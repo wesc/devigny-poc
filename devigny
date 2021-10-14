@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+
+import os
+import re
+import yaml
+
+import click
+
+import impl
+import fetch
+
+CONFIG_FILENAME = "config.yaml"
+
+NUMS = impl.Params(
+    G=impl.point_from_b58(
+        "5XXrcDeFXXtfmEaFSMQFaqSgjrHqCpZt6RGEZZFoUT1E,3Yy2waQmxAnDVD3ZUvXPPG1D5bmwJ6P8BuhrJFWF8mX"
+    ),
+    H=impl.point_from_b58(
+        "DT6PDHN6me7mszQjoCZDdgzZhQMesBkVK4Yvruc9DszU,CxhS4RpWYk4pqobZGSG25FXC4Dx1sDwMUaG33UnEUASt"
+    ),
+)
+
+
+def read_config():
+    try:
+        with open(CONFIG_FILENAME, "rt") as finp:
+            data = yaml.load(finp, Loader=yaml.SafeLoader)
+            return data
+    except FileNotFoundError:
+        raise click.FileError(CONFIG_FILENAME, "did you run 'init'?")
+
+
+def write_config(conf):
+    output = yaml.dump(conf)
+    with open(CONFIG_FILENAME, "wt") as fout:
+        fout.write(output)
+
+
+@click.group()
+def cli():
+    pass
+
+
+@cli.command()
+def init():
+    """Create a new secret key."""
+
+    if os.path.exists(CONFIG_FILENAME):
+        raise click.FileError(CONFIG_FILENAME, "I won't overwrite an existing file")
+
+    click.echo(f"generating new secret key into {CONFIG_FILENAME}")
+    sk = NUMS.random()
+    write_config({"sk": sk, "claims": {}})
+
+
+@cli.command()
+def make_claim():
+    """Generate a new claim."""
+
+    conf = read_config()
+    sk = conf["sk"]
+    C = impl.Commitment(NUMS, x=sk)
+    data = C.to_dict()
+    Z = data["Z"]
+    click.echo(f"claim: {Z}")
+    conf["claims"][Z] = data
+    write_config(conf)
+
+
+@cli.command()
+@click.argument("claim", type=str)
+def rm_claim(claim):
+    """Remove a claim."""
+
+    conf = read_config()
+    try:
+        del conf["claims"][claim]
+        write_config(conf)
+    except KeyError:
+        raise click.UsageError(f"claim {claim} doesn't exist")
+
+
+@cli.command()
+@click.argument("claim", type=str)
+@click.argument("uri", type=str)
+def bind_claim(claim, uri):
+    """Binds a claim to a uri."""
+
+    conf = read_config()
+    try:
+        data = conf["claims"][claim]
+    except KeyError:
+        raise click.UsageError(f"claim {claim} doesn't exist")
+
+    if "uri" in data:
+        raise click.UsageError(
+            f"claim already bound to {data['uri']} (you cafn manually remove it if you'd like)"
+        )
+
+    data["uri"] = uri
+    write_config(conf)
+
+
+@cli.command()
+def list_claims():
+    """List claims and their bindings."""
+
+    conf = read_config()
+    for claim, data in sorted(conf["claims"].items()):
+        uri = data.get("uri", "-")
+
+        click.echo(f"{claim}\t{uri}")
+
+
+@cli.command()
+@click.option("--public/--no-public", default=False)
+def prove_claims(public):
+    """Generate a proof book."""
+
+    conf = read_config()
+
+    # We generate a root commitment and prove knowledge of its
+    # opening. We then generate a zero-knowledge proof of message
+    # equality for every claim.
+    book = {}
+    root = impl.Commitment(NUMS, x=conf["sk"])
+    book["root"] = root.pk_opening()
+
+    book["proofs"] = {}
+    for C, data in sorted(conf["claims"].items()):
+        if "uri" not in data:
+            continue
+        uri = data["uri"]
+        zk = impl.Commitment.from_dict(data).zk_x_eq(root, binding=uri)
+        book["proofs"][C] = zk
+        if public:
+            book["proofs"][C]["binding"] = uri
+
+    click.echo(yaml.dump(book), nl=False)
+
+
+class CheckError(Exception):
+    pass
+
+
+def _check_claim(book, uri, claim):
+    root = book["root"]
+    proofs = book["proofs"]
+
+    if claim not in proofs:
+        raise CheckError(f"claim {claim} not in proof book")
+
+    check = f"claim {claim} must be consistent"
+    if proofs[claim]["P"] != claim:
+        raise CheckError(check)
+
+    check = f"proof of claim {claim} must derive from root {root['Z']}"
+    if proofs[claim]["Q"] != root["Z"]:
+        raise CheckError(check)
+
+    check = f"claim {claim} must use standard public paramters"
+    PG = impl.point_from_b58(proofs[claim]["PG"])
+    PH = impl.point_from_b58(proofs[claim]["PH"])
+    if PG != NUMS.G or PH != NUMS.H:
+        raise CheckError(check)
+
+    check = f"proof of claim {claim} must be valid"
+    if "binding" in proofs[claim]:
+        del proofs[claim]["binding"]
+    if not impl.Commitment.verify_x_eq(**proofs[claim], binding=uri):
+        raise CheckError(check)
+
+
+@cli.command()
+@click.argument("book", type=str, required=True)
+@click.argument("uri", nargs=-1, type=str, required=False)
+def verify(book, uri):
+    """Check URIs against stated claim in a proof book."""
+
+    proof_book = yaml.load(fetch.fetch(book), Loader=yaml.SafeLoader)
+    proofs = proof_book["proofs"]
+
+    if not uri:
+        # check any bindings found in proofs
+        uri = sorted([p["binding"] for p in proofs.values() if "binding" in p])
+
+    for u in uri:
+        try:
+            content = fetch.fetch(u)
+        except fetch.FetchError as e:
+            click.echo(f"{u} -- FAIL, {e}")
+            continue
+        claim = re.search(r"devigny:0:([0-9a-zA-z]+,[0-9a-zA-Z]+)", content)
+        if not claim:
+            click.echo(f"{u} -- FAIL, unable to find devigny signature")
+            continue
+        # take the last claim
+        sig = claim.groups()[-1]
+
+        if sig not in proofs:
+            click.echo(
+                f"{u} -- FAIL, unable to find proof for signature {sig} in {book}"
+            )
+
+        try:
+            _check_claim(proof_book, u, sig)
+        except CheckError as e:
+            click.echo(f"{u} -- FAIL, {e}")
+            continue
+
+        click.echo(f"{u} -- OK")
+
+
+if __name__ == "__main__":
+    cli()

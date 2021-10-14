@@ -1,0 +1,6 @@
+*~
+venv/
+config.yaml
+__pycache__/
+proofs.yaml
+.envrc

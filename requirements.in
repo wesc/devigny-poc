@@ -1,0 +1,6 @@
+base58
+click
+pycryptodome
+pyyaml
+requests
+tweepy
