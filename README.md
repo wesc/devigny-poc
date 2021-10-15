@@ -75,6 +75,15 @@ $ ./devigny verify ipfs://bafkreiaqst7ppesyewoui6fkv5fprh74ly6lv5vramagekvylwfud
 twitter://jack -- FAIL, proof of claim CE3va4sKE575MrntLhgnTM9eBpsg861WPkeH5pWgSSpe,e6F8b8Ypo5GZ9K2ozQB4CNSC4gLbR8W6DHuHsZFQoWU must be valid
 ```
 
+The check also fails when run against an imposter account. For
+example, @yesdefwes is most certainly not @weschow, despite [claiming
+to be](https://twitter.com/yesdefwes/status/1449131650605068290):
+
+```
+$ ./devigny verify ipfs://bafkreiaqst7ppesyewoui6fkv5fprh74ly6lv5vramagekvylwfudhioji twitter://yesdefwes
+twitter://yesdefwes -- FAIL, proof of claim CE3va4sKE575MrntLhgnTM9eBpsg861WPkeH5pWgSSpe,e6F8b8Ypo5GZ9K2ozQB4CNSC4gLbR8W6DHuHsZFQoWU must be valid
+```
+
 A _public_ proof book contains the linked accounts URIs, and so can be
 checked:
 
@@ -161,10 +170,8 @@ consists of:
 3. series of ZK proofs that claims are commitments to the same secret
    key as the root.
 
-Note that proofs must only work for the bound URI, eg @jack should not
-be able to impersonate @weschow by copying a commitment. To defend
-against this, Devigny utilizes a specific form of challenge when
-generating the non-interactive proofs. See
+To defend against impersonation, Devigny utilizes a specific form of
+challenge when generating the non-interactive proofs. See
 [theory](theory.md) for details.
 
 ## Authorship
